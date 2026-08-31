@@ -12,7 +12,7 @@ Behavior notes:
   them to the same status codes and messages as before.
 """
 
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -27,6 +27,42 @@ class ChatMessage(BaseModel):
     type: str = Field(..., description="Message type (human|ai)")
     content: str = Field(..., description="Message content")
     timestamp: Optional[str] = Field(None, description="Message timestamp")
+    references: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Citation map for numbered references in the content, e.g. "
+            "[{number: 1, type: 'source_embedding', id: '<ulid>', ...}]"
+        ),
+    )
+
+
+def build_citation_references(
+    retrieved_passages: Optional[List[Dict[str, Any]]],
+) -> List[Dict[str, Any]]:
+    """Build the number -> passage map for numbered citations.
+
+    ``retrieve_relevant_passages`` assigns a sequential ``number`` to each
+    passage; the chat prompt tells the model to cite passages as ``[1]``,
+    ``[2]``, ... This map lets the frontend turn those numbers into clickable
+    links pointing at the real record.
+    """
+    references: List[Dict[str, Any]] = []
+    for passage in retrieved_passages or []:
+        number = passage.get("number")
+        rid = str(passage.get("id") or "")
+        if not number or ":" not in rid:
+            continue
+        rtype, _, rid_val = rid.partition(":")
+        references.append(
+            {
+                "number": number,
+                "type": rtype,
+                "id": rid_val,
+                "parent_id": passage.get("parent_id"),
+                "title": passage.get("title"),
+            }
+        )
+    return references
 
 
 class SuccessResponse(BaseModel):

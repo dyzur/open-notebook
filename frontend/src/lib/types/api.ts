@@ -200,11 +200,20 @@ export interface NotebookChatSession extends BaseChatSession {
   notebook_id: string
 }
 
+export interface CitationReference {
+  number: number
+  type: 'source' | 'note' | 'source_insight' | 'source_embedding'
+  id: string
+  parent_id?: string
+  title?: string
+}
+
 export interface NotebookChatMessage {
   id: string
   type: 'human' | 'ai'
   content: string
   timestamp?: string
+  references?: CitationReference[]
 }
 
 export interface NotebookChatSessionWithMessages extends NotebookChatSession {

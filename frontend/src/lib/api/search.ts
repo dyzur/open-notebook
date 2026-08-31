@@ -9,6 +9,18 @@ export const searchApi = {
     return response.data
   },
 
+  // Resolve a source_embedding chunk id to its parent source (for citation clicks)
+  resolveChunk: async (chunkId: string) => {
+    const response = await apiClient.get(`/search/chunk/${chunkId}`)
+    return response.data as {
+      id: string
+      source_id: string
+      source_title: string
+      content: string
+      order: number
+    }
+  },
+
   // Ask with streaming (uses relative URL for Docker compatibility)
   askKnowledgeBase: async (params: AskRequest, signal?: AbortSignal) => {
     // Get auth token using the same logic as apiClient interceptor

@@ -1,7 +1,7 @@
 import React from 'react'
 import { FileText, Lightbulb, FileEdit } from 'lucide-react'
 
-export type ReferenceType = 'source' | 'note' | 'source_insight'
+export type ReferenceType = 'source' | 'note' | 'source_insight' | 'source_embedding'
 
 export interface ParsedReference {
   type: ReferenceType
@@ -38,19 +38,19 @@ export interface ReferenceData {
  * - [source:abc123] → single reference
  * - [note:a], [note:b] → multiple references
  * - [note:a, note:b] → comma-separated references (edge case from LLM)
- * - Mixed: [source:x, note:y, source_insight:z]
+ * - Mixed: [source:x, note:y, source_insight:z, source_embedding:w]
  *
  * @param text - Text containing references
  * @returns Array of parsed references
  */
 export function parseSourceReferences(text: string): ParsedReference[] {
-  // Match pattern: (source_insight|insight|note|source):alphanumeric_id
+  // Match pattern: (source_embedding|source_insight|insight|note|source):alphanumeric_id
   // This handles references both inside and outside brackets.
   // `insight:` is accepted as an alias for `source_insight` — some models emit the
   // short form — and normalized below so all downstream rendering (icon, link,
-  // click handler) treats it identically. Keep `source_insight` first in the
-  // alternation so it wins over the `insight` alias.
-  const pattern = /(source_insight|insight|note|source):([a-zA-Z0-9_]+)/g
+  // click handler) treats it identically. Keep the longer prefixes first in the
+  // alternation so they win over `source:`.
+  const pattern = /(source_embedding|source_insight|insight|note|source):([a-zA-Z0-9_]+)/g
   const matches: ParsedReference[] = []
 
   let match
@@ -179,7 +179,7 @@ export function convertSourceReferences(
 export function convertReferencesToMarkdownLinks(text: string): string {
   // Step 1: Find ALL references using simple greedy pattern.
   // `insight:` is accepted as an alias for `source_insight` and normalized below.
-  const refPattern = /(source_insight|insight|note|source):([a-zA-Z0-9_]+)/g
+  const refPattern = /(source_embedding|source_insight|insight|note|source):([a-zA-Z0-9_]+)/g
   const references: Array<{ type: string; id: string; index: number; length: number }> = []
 
   let match
@@ -188,7 +188,7 @@ export function convertReferencesToMarkdownLinks(text: string): string {
     const id = match[2]
 
     // Validate the reference
-    const validTypes = ['source', 'source_insight', 'insight', 'note']
+    const validTypes = ['source', 'source_embedding', 'source_insight', 'insight', 'note']
     if (!validTypes.includes(rawType) || !id || id.length === 0 || id.length > 100) {
       continue // Skip invalid references
     }
@@ -292,7 +292,7 @@ export function createReferenceLinkComponent(
 
       // Select appropriate icon based on reference type
       const IconComponent =
-        type === 'source' ? FileText :
+        type === 'source' || type === 'source_embedding' ? FileText :
         type === 'source_insight' ? Lightbulb :
         FileEdit // note
 
@@ -322,6 +322,45 @@ export function createReferenceLinkComponent(
 
   ReferenceLinkComponent.displayName = 'ReferenceLinkComponent'
   return ReferenceLinkComponent
+}
+
+/**
+ * Convert numbered citations like [3] into clickable reference links.
+ *
+ * The notebook-chat model cites retrieved passages as short numbers ([1],
+ * [2], ...) to keep the essay text compact. This resolves each number through
+ * the per-message references map (number -> real record) into a
+ * `#ref-{type}-{id}` link that `createCompactReferenceLinkComponent` renders.
+ * Any number without a map entry (e.g. an insight's prefixed id, or stale
+ * history after reload) is left as plain text.
+ */
+export function convertNumberedReferencesToMarkdown(
+  text: string,
+  references: Array<{ number: number; type: string; id: string }>
+): string {
+  if (!references || references.length === 0) return text
+
+  const byNumber = new Map<number, { type: string; id: string }>()
+  for (const ref of references) {
+    if (ref && typeof ref.number === 'number' && ref.id) {
+      byNumber.set(ref.number, { type: ref.type, id: ref.id })
+    }
+  }
+  if (byNumber.size === 0) return text
+
+  // Matches [1], [7, 8], [1, 9, 12] — single or comma-separated numbers.
+  return text.replace(/\[(\d{1,3}(?:\s*,\s*\d{1,3})*)\]/g, (match, nums: string) => {
+    const links = nums.split(',').map((num) => {
+      const trimmed = num.trim()
+      const ref = byNumber.get(Number(trimmed))
+      return ref
+        ? `[${trimmed}](#ref-${ref.type}-${ref.id})`
+        : trimmed
+    })
+    // Only rewrite if at least one number resolved to a reference.
+    const anyLinked = links.some((l) => l.startsWith('['))
+    return anyLinked ? `[${links.join(', ')}]` : match
+  })
 }
 
 /**

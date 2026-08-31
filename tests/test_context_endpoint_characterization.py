@@ -219,6 +219,83 @@ async def test_default_path_survives_insight_batch_failure(client):
 
 
 @pytest.mark.asyncio
+async def test_config_includes_citable_chunks(client):
+    """Sources with embeddings get per-passage chunks in their context.
+
+    "insights" mode appends chunks next to the insights; "full content" mode
+    swaps the uncitable full_text blob for the same text as citable chunks.
+    """
+    chunk_items = [
+        {"id": "source_embedding:c1", "content": "chunk one", "order": 0},
+        {"id": "source_embedding:c2", "content": "chunk two", "order": 1},
+    ]
+    source_short = _source("source:s2", {"id": "source:s2", "insights": ["i"]})
+    source_short.get_citable_chunks = AsyncMock(return_value=chunk_items)
+    source_long = _source("source:s3", {"id": "source:s3", "full_text": "body"})
+    source_long.get_citable_chunks = AsyncMock(return_value=chunk_items)
+
+    async def get_source(full_id):
+        return {"source:s2": source_short, "source:s3": source_long}[full_id]
+
+    with (
+        patch(PATCH_NOTEBOOK, new=AsyncMock(return_value=_notebook())),
+        patch(PATCH_SOURCE, new=AsyncMock(side_effect=get_source)),
+        patch(PATCH_NOTE, new=AsyncMock(return_value=_note())),
+    ):
+        response = client.post(
+            "/api/chat/context",
+            json={
+                "notebook_id": "notebook:1",
+                "context_config": {
+                    "sources": {"s2": "insights", "s3": "full content"},
+                    "notes": {},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    sources = response.json()["context"]["sources"]
+    # insights mode: chunks appended alongside insights
+    assert sources[0] == {
+        "id": "source:s2",
+        "insights": ["i"],
+        "chunks": chunk_items,
+    }
+    # full content mode: chunks replace the uncitable full_text blob
+    assert sources[1] == {
+        "id": "source:s3",
+        "full_text": None,
+        "chunks": chunk_items,
+    }
+    # Chunk content counts toward the reported char/token totals.
+    assert "chunk one" in response.json()["context"]["sources"][0]["chunks"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_chunk_loading_failure_is_tolerated(client):
+    """A failed chunk load must not fail the whole context request."""
+    source = _source("source:ok", {"id": "source:ok", "insights": ["i"]})
+    source.get_citable_chunks = AsyncMock(side_effect=Exception("db hiccup"))
+
+    with (
+        patch(PATCH_NOTEBOOK, new=AsyncMock(return_value=_notebook())),
+        patch(PATCH_SOURCE, new=AsyncMock(return_value=source)),
+    ):
+        response = client.post(
+            "/api/chat/context",
+            json={
+                "notebook_id": "notebook:1",
+                "context_config": {"sources": {"ok": "insights"}, "notes": {}},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["context"]["sources"] == [
+        {"id": "source:ok", "insights": ["i"]}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_missing_notebook_returns_404(client):
     with patch(PATCH_NOTEBOOK, new=AsyncMock(return_value=None)):
         response = client.post(

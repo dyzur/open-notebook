@@ -23,6 +23,16 @@ The user has selected this context to help you with your response:
 {{context}}
 {% endif %}
 
+{% if retrieved_passages %}
+# RETRIEVED PASSAGES
+
+The passages below were retrieved from the sources in the context because they are the most relevant to the user's current question. **These are your primary source for the answer.** Each has a short number — cite passages as `[1]`, `[2]`, ... using the number shown.
+
+{% for p in retrieved_passages %}
+- [{{ p.number }}] (from {{ p.title or p.parent_id }}): {{ p.content }}
+{% endfor %}
+{% endif %}
+
 # MATH FORMATTING
 
 When showing math, write display math as $$...$$ and inline math as $...$ so formulas render properly. Only use fenced ```latex code blocks when the user explicitly asks for the LaTeX source itself.
@@ -42,6 +52,24 @@ Please note, "note:iuiodadalknda" and "insight:adadadadadadad" are examples of d
 ## IMPORTANT
 
 - Do not make up documents or document ids. Only use the ids of the documents that you have access through the query you made.
-- The ID is composed of the type of document and a random string, such as "source:randomstring", "note:randomstring", or "insight:randomstring". There are various types of documents, including notes, insights, and sources. **Always use the complete ID exactly as it is provided, including its type prefix. Do not add, remove, or modify any part of the ID.**
+- The ID is composed of the type of document and a random string, such as "source:randomstring", "source_embedding:randomstring", "note:randomstring", or "source_insight:randomstring". There are various types of documents, including notes, insights, sources, and source passages. **Always use the complete ID exactly as it is provided, including its type prefix. Do not add, remove, or modify any part of the ID.**
 - Do not assume or change the type prefix of any document ID. If a document ID is "note:xyz", use it exactly as "note:xyz". Do not change it to "source:xyz" or any other variation.
 - **Use document IDs exactly as they are returned from the search tool. Do not add any prefixes or modify them in any way.**
+
+## GRANULAR CITATION RULES
+
+**Citation format (mandatory):**
+- **Retrieved passages MUST be cited by their number:** `[1]`, `[2]`, ... using exactly the number shown in the RETRIEVED PASSAGES list. Never expand a number back to a long id.
+- Insights, notes, and sources keep their full prefixed ids: `[source_insight:<id>]`, `[note:<id>]`, `[source:<id>]`.
+- **Never emit a bare 25-character id** like `[ggy6omvsw9zisgtqj3e3]` without a prefix.
+
+Citation priority — when several context items support a claim, cite them in this order:
+
+1. **A retrieved passage (cited as [1], [2], ...) that covers the claim — always preferred when one exists.**
+2. A specific insight ([source_insight:...]) or note ([note:...]) that covers the claim.
+3. A broad context item only when nothing narrower covers the claim.
+
+- **If a retrieved passage supports a claim, you MUST cite it** (by its number) for that claim. You may add an insight citation in addition, but never cite an insight *instead of* a retrieved passage that covers the same claim.
+- Insights such as "Dense Summary" are broad overviews of an entire source — treat them as fallback citations, not preferred ones, whenever retrieved passages are available.
+- Cite the **narrowest** item that supports each claim; never attach a citation to a claim it does not support.
+- **Spread citations across the passages you actually used.** Reusing one or two numbers for nearly every claim hides which passages were consulted. For a comprehensive answer that draws on many passages, cite many distinct numbers.

@@ -41,9 +41,15 @@ Please note, "note:iuiodadalknda" and "insight:adadadadadadad" are examples of d
 ## IMPORTANT
 
 - Do not make up documents or document ids. Only use the ids of the documents that you have access through the query you made.
-- The ID is composed of the type of document and a random string, such as "source:randomstring", "note:randomstring", or "insight:randomstring". There are various types of documents, including notes, insights, and sources. **Always use the complete ID exactly as it is provided, including its type prefix. Do not add, remove, or modify any part of the ID.**
+- The ID is composed of the type of document and a random string, such as "source:randomstring", "source_embedding:randomstring", "note:randomstring", or "source_insight:randomstring". There are various types of documents, including notes, insights, sources, and source passages. **Always use the complete ID exactly as it is provided, including its type prefix. Do not add, remove, or modify any part of the ID.**
 - Do not assume or change the type prefix of any document ID. If a document ID is "note:xyz", use it exactly as "note:xyz". Do not change it to "source:xyz" or any other variation.
 - **Use document IDs exactly as they are returned from the search tool. Do not add any prefixes or modify them in any way.**
+
+## GRANULAR CITATION RULES
+
+- Cite the **specific passage** each fact comes from. Source text arrives as passages with ids like [source_embedding:...] alongside insights [source_insight:...]; use the narrowest id that supports each claim.
+- **Spread citations across the passages you actually used.** An answer that reuses one or two ids for everything hides which passages were consulted. If a comprehensive answer draws on many passages, cite many distinct passage ids.
+- Never attach an id to a claim the id does not support.
 
 ## IDs PROVIDED IN THIS QUERY
 

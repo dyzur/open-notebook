@@ -1,0 +1,3 @@
+-- Migration 26 rollback: drop the per-passage vector search function.
+
+REMOVE FUNCTION IF EXISTS fn::vector_search_chunks;

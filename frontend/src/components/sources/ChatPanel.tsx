@@ -18,7 +18,8 @@ import { ModelSelector } from './ModelSelector'
 import { ContextIndicator } from '@/components/common/ContextIndicator'
 import { SessionManager } from '@/components/sources/SessionManager'
 import { MessageActions } from '@/components/sources/MessageActions'
-import { convertReferencesToCompactMarkdown, createCompactReferenceLinkComponent } from '@/lib/utils/source-references'
+import { convertNumberedReferencesToMarkdown, convertReferencesToCompactMarkdown, convertReferencesToMarkdownLinks, createCompactReferenceLinkComponent } from '@/lib/utils/source-references'
+import { searchApi } from '@/lib/api/search'
 import { useModalManager } from '@/lib/hooks/use-modal-manager'
 import { toast } from 'sonner'
 import { useTranslation } from '@/lib/hooks/use-translation'
@@ -84,6 +85,20 @@ export function ChatPanel({
   // composer keystrokes (which no longer re-render this component at all, since
   // the input state lives in the ChatComposer child).
   const handleReferenceClick = useCallback((type: string, id: string) => {
+    if (type === 'source_embedding') {
+      // Passage citation: resolve the chunk to its parent source, then open it.
+      searchApi.resolveChunk(id)
+        .then((chunk) => {
+          if (chunk?.source_id) {
+            openModal('source', chunk.source_id)
+          } else {
+            toast.error(t('common.noResults'))
+          }
+        })
+        .catch(() => toast.error(t('common.noResults')))
+      return
+    }
+
     const modalType = type === 'source_insight' ? 'insight' : type as 'source' | 'note' | 'insight'
 
     try {
@@ -351,6 +366,7 @@ const ChatMessage = memo(function ChatMessage({
           {message.type === 'ai' ? (
             <AIMessageContent
               content={message.content}
+              references={message.references}
               onReferenceClick={onReferenceClick}
             />
           ) : (
@@ -378,14 +394,26 @@ const ChatMessage = memo(function ChatMessage({
 // Helper component to render AI messages with clickable references
 function AIMessageContent({
   content,
+  references,
   onReferenceClick
 }: {
   content: string
+  references?: Array<{ number: number; type: string; id: string }>
   onReferenceClick: (type: string, id: string) => void
 }) {
   const { t } = useTranslation()
-  // Convert references to compact markdown with numbered citations
-  const markdownWithCompactRefs = convertReferencesToCompactMarkdown(content, t('common.references'))
+
+  // Messages carrying a per-message references map cite passages as short
+  // numbers ([1], [2], ...) — resolve those into clickable links. Older
+  // messages without a map use the full-id compact conversion instead.
+  // The second pass keeps any stray prefixed ids (e.g. insight citations)
+  // clickable without renumbering.
+  const markdownWithLinks =
+    references && references.length > 0
+      ? convertReferencesToMarkdownLinks(
+          convertNumberedReferencesToMarkdown(content, references)
+        )
+      : convertReferencesToCompactMarkdown(content, t('common.references'))
 
   // Create custom link component for compact references
   const LinkComponent = createCompactReferenceLinkComponent(onReferenceClick)
@@ -394,7 +422,7 @@ function AIMessageContent({
     <MarkdownRenderer components={{
       a: LinkComponent
     }}>
-      {markdownWithCompactRefs}
+      {markdownWithLinks}
     </MarkdownRenderer>
   )
 }

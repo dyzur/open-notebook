@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
 from open_notebook.ai.provision import provision_langchain_model
-from open_notebook.domain.notebook import vector_search
+from open_notebook.domain.notebook import vector_search_chunks
 from open_notebook.exceptions import OpenNotebookError
 from open_notebook.utils import clean_thinking_content
 from open_notebook.utils.error_classifier import classify_error
@@ -103,7 +103,10 @@ async def provide_answer(state: SubGraphState, config: RunnableConfig) -> dict:
         # if state["type"] == "text":
         #     results = text_search(state["term"], 10, True, True)
         # else:
-        results = await vector_search(state["term"], 10, True, True)
+        # Retrieve per-passage results (chunk-level ids) so the answer model
+        # can cite specific passages; wider top-k so comprehensive answers get
+        # more distinct citable units to draw from.
+        results = await vector_search_chunks(state["term"], 30, True, True)
         if len(results) == 0:
             return {"answers": []}
         payload["results"] = results

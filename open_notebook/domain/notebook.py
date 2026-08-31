@@ -493,6 +493,40 @@ class Source(ObjectModel):
         else:
             return dict(id=self.id, title=self.title, insights=insights)
 
+    async def get_citable_chunks(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return this source's embedded chunks as citable context items.
+
+        Each chunk carries its own ``source_embedding:<ulid>`` id so chat
+        responses can cite specific passages instead of collapsing the whole
+        source onto a single id. Best-effort: returns ``[]`` when the source
+        has no embeddings (e.g. no embedding model configured).
+        """
+        try:
+            results = await repo_query(
+                """
+                SELECT id, content, `order` AS chunk_order
+                FROM source_embedding
+                WHERE source = $source_id
+                LIMIT $limit
+                """,
+                {"source_id": ensure_record_id(self.id), "limit": limit},
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to fetch citable chunks for source {self.id}: {e}"
+            )
+            return []
+        items = [
+            {
+                "id": r.get("id"),
+                "content": r.get("content"),
+                "order": r.get("chunk_order", 0),
+            }
+            for r in results or []
+            if r.get("content")
+        ]
+        return sorted(items, key=lambda item: item["order"])
+
     async def get_embedded_chunks(self) -> int:
         try:
             result = await repo_query(
@@ -835,5 +869,44 @@ async def vector_search(
         return search_results
     except Exception as e:
         logger.error(f"Error performing vector search: {str(e)}")
+        logger.exception(e)
+        raise DatabaseOperationError(e)
+
+
+async def vector_search_chunks(
+    keyword: str,
+    results: int,
+    source: bool = True,
+    note: bool = True,
+    minimum_score=0.2,
+):
+    """Vector search that keeps per-passage (chunk-level) ids.
+
+    Unlike :func:`vector_search`, which collapses every chunk of a source onto
+    the source id, this returns each matched chunk under its own
+    ``source_embedding:<ulid>`` id (plus insights and notes) so LLM prompts can
+    cite specific passages. See fn::vector_search_chunks in migration 24.
+    """
+    if not keyword:
+        raise InvalidInputError("Search keyword cannot be empty")
+    try:
+        from open_notebook.utils.embedding import generate_embedding
+
+        embed = await generate_embedding(keyword)
+        search_results = await repo_query(
+            """
+            SELECT * FROM fn::vector_search_chunks($embed, $results, $source, $note, $minimum_score);
+            """,
+            {
+                "embed": embed,
+                "results": results,
+                "source": source,
+                "note": note,
+                "minimum_score": minimum_score,
+            },
+        )
+        return search_results
+    except Exception as e:
+        logger.error(f"Error performing chunk-level vector search: {str(e)}")
         logger.exception(e)
         raise DatabaseOperationError(e)

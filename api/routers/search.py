@@ -7,6 +7,7 @@ from loguru import logger
 
 from api.models import AskRequest, AskResponse, SearchRequest, SearchResponse
 from open_notebook.ai.models import Model, model_manager
+from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import text_search, vector_search
 from open_notebook.exceptions import (
     DatabaseOperationError,
@@ -64,6 +65,43 @@ async def search_knowledge_base(search_request: SearchRequest):
     except Exception as e:
         logger.error(f"Unexpected error during search: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get("/search/chunk/{chunk_id}")
+async def resolve_chunk(chunk_id: str):
+    """Resolve a ``source_embedding`` chunk id to its parent source.
+
+    Chat answers cite specific passages as ``[source_embedding:<ulid>]``; this
+    lets the frontend turn a passage citation into a click that opens the
+    parent source.
+    """
+    try:
+        chunk_id = chunk_id.split(":")[-1]  # tolerate a full id if passed
+        record = await repo_query(
+            """
+            SELECT id, content, `order` AS chunk_order,
+                   source.id as source_id, source.title as source_title
+            FROM source_embedding
+            WHERE id = $id
+            LIMIT 1
+            """,
+            {"id": ensure_record_id(f"source_embedding:{chunk_id}")},
+        )
+        if not record:
+            raise HTTPException(status_code=404, detail="Chunk not found")
+        row = record[0]
+        return {
+            "id": row.get("id"),
+            "source_id": row.get("source_id"),
+            "source_title": row.get("source_title"),
+            "content": row.get("content"),
+            "order": row.get("chunk_order", 0),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error resolving chunk {chunk_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to resolve chunk")
 
 
 async def stream_ask_response(

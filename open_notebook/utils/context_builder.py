@@ -16,6 +16,7 @@ the frontend — do not change it here.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Dict, Optional, Tuple
 
@@ -297,10 +298,23 @@ async def build_notebook_context(
 
                 if "insights" in status:
                     source_context = await source.get_context(context_size="short")
+                    chunks = await _source_citable_chunks(
+                        source, limit=_chunks_per_source_limit("insights")
+                    )
+                    if chunks:
+                        source_context["chunks"] = chunks
                     context_data["sources"].append(source_context)
                     total_content += str(source_context)
                 elif "full content" in status:
                     source_context = await source.get_context(context_size="long")
+                    chunks = await _source_citable_chunks(
+                        source, limit=_chunks_per_source_limit("full")
+                    )
+                    if chunks:
+                        # Chunks carry the same text as citable passages; drop
+                        # the uncitable blob so content isn't duplicated.
+                        source_context["chunks"] = chunks
+                        source_context["full_text"] = None
                     context_data["sources"].append(source_context)
                     total_content += str(source_context)
             except Exception as e:
@@ -342,6 +356,11 @@ async def build_notebook_context(
                     context_size="short",
                     insights=insights_by_source.get(source.id or "", []),
                 )
+                chunks = await _source_citable_chunks(
+                    source, limit=_chunks_per_source_limit("insights")
+                )
+                if chunks:
+                    source_context["chunks"] = chunks
                 context_data["sources"].append(source_context)
                 total_content += str(source_context)
             except Exception as e:
@@ -359,6 +378,148 @@ async def build_notebook_context(
                 continue
 
     return context_data, total_content
+
+
+async def _source_citable_chunks(source: Any, limit: int) -> list:
+    """Best-effort per-passage chunks for a source; ``[]`` when unavailable.
+
+    Uses ``getattr`` so callers/tests that stub sources without the method
+    (or a source with no embeddings) keep the previous context shape.
+    """
+    loader = getattr(source, "get_citable_chunks", None)
+    if loader is None:
+        return []
+    try:
+        chunks = await loader(limit=limit)
+    except Exception as e:
+        logger.warning(f"Failed to load citable chunks for source {source.id}: {e}")
+        return []
+    return chunks or []
+
+
+def _chunks_per_source_limit(context_size: str) -> int:
+    """Max citable passages included per source for notebook chat context.
+
+    Configurable so the context stays inside the chat model's window:
+    - ``OPEN_NOTEBOOK_CHUNKS_PER_SOURCE`` (default 12) for "insights" mode.
+    - ``OPEN_NOTEBOOK_CHUNKS_PER_SOURCE_FULL`` (default 1000) for "full
+      content" mode, which replaces the uncitable full_text blob.
+    """
+    if context_size == "full":
+        env_name, default = "OPEN_NOTEBOOK_CHUNKS_PER_SOURCE_FULL", 1000
+    else:
+        env_name, default = "OPEN_NOTEBOOK_CHUNKS_PER_SOURCE", 12
+    raw = os.getenv(env_name)
+    if raw is None:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+async def retrieve_relevant_passages(
+    query: str, context: Optional[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Vector-retrieve the source passages most relevant to ``query``.
+
+    Notebook chat context is static (insights + prefix chunks), but the
+    passages a specific question needs may live anywhere in a long source.
+    This runs a chunk-level vector search and keeps only results whose parent
+    source is part of the current context, so citations always point at
+    sources the user selected. Best-effort: any failure returns ``[]``.
+
+    A single embedding of the question can miss high-yield facts (e.g. a
+    question about "hypnotic drugs" won't surface "porphyria" or "CYP1A2"),
+    so the query is expanded into several variants and the results are
+    unioned by passage id before capping.
+    """
+    if not query or not context:
+        return []
+    selected_ids: set = set()
+    for source in context.get("sources") or []:
+        sid = source.get("id") if isinstance(source, dict) else None
+        if sid:
+            selected_ids.add(str(sid).split(":")[-1])
+    if not selected_ids:
+        return []
+
+    try:
+        from open_notebook.domain.notebook import vector_search_chunks
+    except Exception:
+        return []
+
+    # Query variants: the question itself, plus expansions that pull in
+    # high-yield safety/kinetics facts and mechanism/selection detail that a
+    # plain question embedding often misses.
+    query_variants = _retrieval_query_variants(query)
+
+    scored: Dict[str, tuple] = {}
+    for variant in query_variants:
+        try:
+            results = await vector_search_chunks(variant, 50, source=True, note=False)
+        except Exception as e:
+            logger.warning(f"Passage retrieval failed for chat message: {e}")
+            continue
+        for result in results or []:
+            parent = str(result.get("parent_id") or "").split(":")[-1]
+            if parent not in selected_ids:
+                continue
+            rid = str(result.get("id") or "")
+            if not rid:
+                continue
+            matches = result.get("matches")
+            content = (
+                matches
+                if isinstance(matches, str)
+                else " ".join(matches or [])
+            )
+            if not content:
+                continue
+            similarity = result.get("similarity") or 0
+            if rid not in scored or similarity > scored[rid][0]:
+                scored[rid] = (
+                    similarity,
+                    {
+                        "id": rid,
+                        "parent_id": result.get("parent_id"),
+                        "title": result.get("title"),
+                        "content": content,
+                    },
+                )
+
+    # How many relevant passages to hand the model (configurable; more passages
+    # = more distinct citable units to spread citations across).
+    raw_limit = os.getenv("OPEN_NOTEBOOK_RETRIEVED_PASSAGES")
+    try:
+        max_passages = max(1, int(raw_limit)) if raw_limit else 30
+    except ValueError:
+        max_passages = 30
+
+    ranked = [entry for _, entry in sorted(scored.values(), key=lambda kv: kv[0], reverse=True)]
+    return ranked[:max_passages]
+
+
+_HIGH_YIELD_EXPANSION = (
+    " Also cover: contraindications, porphyria, overdose, toxicity, "
+    "respiratory depression, drug interactions, metabolism (CYP enzymes), "
+    "half-lives, active metabolites, withdrawal, dependence."
+)
+
+_MECHANISM_EXPANSION = (
+    " Also cover: receptor subtypes (alpha1, alpha2/3, MT1, MT2, OX1, OX2), "
+    "mechanism of action, GABA-A receptor pharmacology, clinical selection, "
+    "adverse effects."
+)
+
+
+def _retrieval_query_variants(query: str) -> List[str]:
+    """Deterministic query expansion for passage retrieval."""
+    return [
+        query,
+        f"{query}{_HIGH_YIELD_EXPANSION}",
+        f"{query}{_MECHANISM_EXPANSION}",
+    ]
 
 
 async def build_source_context(

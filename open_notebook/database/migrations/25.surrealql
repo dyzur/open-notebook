@@ -1,0 +1,4 @@
+-- Migration 25: no-op placeholder.
+-- Same situation as migration 24: version 25 was already applied by a newer
+-- checkout before this tree's migration files were trimmed to 23. Kept only
+-- for index alignment of the migration runner.

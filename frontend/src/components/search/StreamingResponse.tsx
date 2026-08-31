@@ -8,6 +8,7 @@ import { CheckCircle, Sparkles, Lightbulb, ChevronDown } from 'lucide-react'
 import { useState } from 'react'
 import { MarkdownRenderer } from '@/components/ui/markdown-renderer'
 import { convertReferencesToMarkdownLinks, createReferenceLinkComponent } from '@/lib/utils/source-references'
+import { searchApi } from '@/lib/api/search'
 import { useModalManager } from '@/lib/hooks/use-modal-manager'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { toast } from 'sonner'
@@ -36,6 +37,20 @@ export function StreamingResponse({
   const { t } = useTranslation()
 
   const handleReferenceClick = (type: string, id: string) => {
+    if (type === 'source_embedding') {
+      // Passage citation: resolve the chunk to its parent source, then open it.
+      searchApi.resolveChunk(id)
+        .then((chunk) => {
+          if (chunk?.source_id) {
+            openModal('source', chunk.source_id)
+          } else {
+            toast.error(t('common.itemNotFound', { type: 'source' }))
+          }
+        })
+        .catch(() => toast.error(t('common.itemNotFound', { type: 'source' })))
+      return
+    }
+
     const modalType = type === 'source_insight' ? 'insight' : type as 'source' | 'note' | 'insight'
 
     try {

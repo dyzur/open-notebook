@@ -1,0 +1,72 @@
+-- Migration 26: per-passage (chunk-level) vector search for LLM grounding.
+-- fn::vector_search collapses every chunk of a source onto the source id, so
+-- LLM prompts can only cite one id per source. This function returns each
+-- matched source_embedding chunk under its own `source_embedding:<ulid>` id
+-- (insights and notes keep their own ids) so answers can cite specific
+-- passages, mirroring NotebookLM-style passage-level grounding.
+--
+-- Numbered 26 (not 24) because this database was already migrated to version
+-- 25 by a newer checkout; migrations 24/25 exist here only as no-op
+-- placeholders for runner alignment.
+
+REMOVE FUNCTION IF EXISTS fn::vector_search_chunks;
+
+DEFINE FUNCTION IF NOT EXISTS fn::vector_search_chunks($query: array<float>, $match_count: int, $sources: bool, $show_notes: bool, $min_similarity: float) {
+    let $source_chunk_search =
+        IF $sources {(
+            SELECT
+                id,
+                source.id as parent_id,
+                source.title as title,
+                content,
+                vector::similarity::cosine(embedding, $query) as similarity
+            FROM source_embedding
+            WHERE embedding != none and array::len(embedding)=array::len($query) AND
+                 vector::similarity::cosine(embedding, $query) >= $min_similarity
+            ORDER BY similarity DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    let $source_insight_search =
+        IF $sources {(
+            SELECT
+                id,
+                insight_type + ' - ' + (source.title OR '') as title,
+                content,
+                source.id as parent_id,
+                vector::similarity::cosine(embedding, $query) as similarity
+            FROM source_insight
+             WHERE embedding != none and array::len(embedding)=array::len($query) AND
+            vector::similarity::cosine(embedding, $query) >= $min_similarity
+            ORDER BY similarity DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    let $note_content_search =
+        IF $show_notes {(
+            SELECT
+                id,
+                title,
+                content,
+                id as parent_id,
+                vector::similarity::cosine(embedding, $query) as similarity
+            FROM note
+            WHERE embedding != none and array::len(embedding)=array::len($query) AND
+            vector::similarity::cosine(embedding, $query) >= $min_similarity
+            ORDER BY similarity DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    let $all_results = array::union(
+        array::union($source_chunk_search, $source_insight_search),
+        $note_content_search
+    );
+
+    RETURN (select id, parent_id, title, math::max(similarity) as similarity,
+    array::flatten(content) as matches
+    from $all_results where id is not None
+    group by id, parent_id, title ORDER BY similarity DESC LIMIT $match_count);
+};

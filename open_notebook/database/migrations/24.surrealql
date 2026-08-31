@@ -1,0 +1,6 @@
+-- Migration 24: no-op placeholder.
+-- This database was migrated to version 24 by a newer checkout before the
+-- migration files were trimmed back to 23 in this tree. The _sbl_migrations
+-- table already records version 24 as applied, so nothing runs here — the
+-- file only exists to keep the index-based migration runner aligned
+-- (up_migrations[i] <-> migrations/i+1.surrealql).

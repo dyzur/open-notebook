@@ -1,6 +1,6 @@
 import asyncio
 import sqlite3
-from typing import Annotated, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from ai_prompter import Prompter
 from langchain_core.messages import SystemMessage
@@ -25,6 +25,7 @@ class ThreadState(TypedDict):
     context: Optional[str]
     context_config: Optional[dict]
     model_override: Optional[str]
+    retrieved_passages: Optional[List[Dict[str, Any]]]
 
 
 def call_model_with_messages(state: ThreadState, config: RunnableConfig) -> dict:

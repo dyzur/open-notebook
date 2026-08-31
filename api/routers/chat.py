@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from api.routers._chat_shared import (
     ChatMessage,
     SuccessResponse,
+    build_citation_references,
     extract_chat_messages,
     get_session_or_404,
 )
@@ -21,7 +22,11 @@ from open_notebook.exceptions import (
 )
 from open_notebook.graphs.chat import graph as chat_graph
 from open_notebook.utils import token_count
-from open_notebook.utils.context_builder import build_notebook_context
+from open_notebook.utils.text_utils import normalize_passage_citations
+from open_notebook.utils.context_builder import (
+    build_notebook_context,
+    retrieve_relevant_passages,
+)
 from open_notebook.utils.graph_utils import get_session_message_count
 
 router = APIRouter()
@@ -198,6 +203,15 @@ async def get_session(session_id: str):
         if thread_state and thread_state.values and "messages" in thread_state.values:
             messages = extract_chat_messages(thread_state.values["messages"])
 
+        # Re-attach the citation map for the most recent message (the latest
+        # checkpoint state carries the retrieved passages it was generated
+        # with). Older numbered messages lose their map after reload and fall
+        # back to plain text — acceptable trade-off for short citations.
+        if messages:
+            messages[-1].references = build_citation_references(
+                (thread_state.values or {}).get("retrieved_passages")
+            )
+
         # Find notebook_id (we need to query the relationship)
         notebook_query = await repo_query(
             "SELECT out FROM refers_to WHERE in = $session_id",
@@ -335,6 +349,18 @@ async def execute_chat(request: ExecuteChatRequest):
         state_values = current_state.values if current_state else {}
         state_values["messages"] = state_values.get("messages", [])
         state_values["context"] = request.context
+        # Per-message retrieval: pull the passages most relevant to this
+        # question from the selected sources, so the model can cite the actual
+        # passages instead of only broader insights. Best-effort (never fails
+        # the chat when retrieval is unavailable).
+        retrieved_passages = await retrieve_relevant_passages(
+            request.message, request.context
+        )
+        # Number the passages 1..N in relevance order so the prompt can use
+        # short [1], [2], ... citations instead of 30-char record ids.
+        for number, passage in enumerate(retrieved_passages, start=1):
+            passage["number"] = number
+        state_values["retrieved_passages"] = retrieved_passages
         state_values["notebook"] = notebook
         state_values["model_override"] = model_override
 
@@ -369,6 +395,24 @@ async def execute_chat(request: ExecuteChatRequest):
 
         # Convert messages to response format
         messages = extract_chat_messages(result.get("messages", []))
+
+        # Attach the number -> passage map so the frontend can turn [1], [2], ...
+        # citations in the essay into clickable links.
+        if messages:
+            messages[-1].references = build_citation_references(
+                state_values.get("retrieved_passages")
+            )
+
+        # Safety net: some models drop the "source_embedding:" prefix and emit
+        # bare ids like [ggy6omvsw9zisgtqj3e3], which the frontend can't render
+        # as clickable citations. Re-prefix any bare id that matches one of the
+        # passages we retrieved for this message.
+        if state_values.get("retrieved_passages"):
+            normalized_content = normalize_passage_citations(
+                messages[-1].content, state_values["retrieved_passages"]
+            )
+            if normalized_content != messages[-1].content:
+                messages[-1].content = normalized_content
 
         return ExecuteChatResponse(session_id=request.session_id, messages=messages)
     except NotFoundError:
