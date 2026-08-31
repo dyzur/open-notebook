@@ -16,6 +16,7 @@ the frontend — do not change it here.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any, Dict, Optional, Tuple
@@ -432,7 +433,10 @@ async def retrieve_relevant_passages(
     A single embedding of the question can miss high-yield facts (e.g. a
     question about "hypnotic drugs" won't surface "porphyria" or "CYP1A2"),
     so the query is expanded into several variants and the results are
-    unioned by passage id before capping.
+    unioned by passage id before capping. Semantic (vector) and lexical
+    (full-text) results are fused with reciprocal rank fusion; lexical search
+    can be disabled via OPEN_NOTEBOOK_HYBRID_SEARCH for corpora where the
+    full-text analyzer is a poor fit.
     """
     if not query or not context:
         return []
@@ -445,48 +449,74 @@ async def retrieve_relevant_passages(
         return []
 
     try:
-        from open_notebook.domain.notebook import vector_search_chunks
+        from open_notebook.domain.notebook import (
+            text_search_chunks,
+            vector_search_chunks,
+        )
     except Exception:
         return []
 
     # Query variants: the question itself, plus expansions that pull in
-    # high-yield safety/kinetics facts and mechanism/selection detail that a
-    # plain question embedding often misses.
+    # breadth the question embedding alone misses. The expansion suffixes are
+    # configurable via OPEN_NOTEBOOK_RETRIEVAL_EXPANSIONS (JSON array of
+    # strings) so they fit any subject — nothing here is topic-specific.
     query_variants = _retrieval_query_variants(query)
+
+    hybrid = _hybrid_search_enabled()
+    rrf_k = 60  # standard reciprocal-rank-fusion constant
 
     scored: Dict[str, tuple] = {}
     for variant in query_variants:
+        # Semantic candidates (vector).
         try:
-            results = await vector_search_chunks(variant, 50, source=True, note=False)
-        except Exception as e:
-            logger.warning(f"Passage retrieval failed for chat message: {e}")
-            continue
-        for result in results or []:
-            parent = str(result.get("parent_id") or "").split(":")[-1]
-            if parent not in selected_ids:
-                continue
-            rid = str(result.get("id") or "")
-            if not rid:
-                continue
-            matches = result.get("matches")
-            content = (
-                matches
-                if isinstance(matches, str)
-                else " ".join(matches or [])
+            vector_results = await vector_search_chunks(
+                variant, 50, source=True, note=False
             )
-            if not content:
-                continue
-            similarity = result.get("similarity") or 0
-            if rid not in scored or similarity > scored[rid][0]:
-                scored[rid] = (
-                    similarity,
-                    {
-                        "id": rid,
-                        "parent_id": result.get("parent_id"),
-                        "title": result.get("title"),
-                        "content": content,
-                    },
+        except Exception as e:
+            logger.warning(f"Vector retrieval failed for chat message: {e}")
+            vector_results = []
+        # Lexical candidates (full-text) — exact terms a semantic embedding
+        # can miss. Optional; falls back to vector-only on failure or when
+        # disabled (e.g. non-English corpora where the EN analyzer hurts).
+        text_results = []
+        if hybrid:
+            try:
+                text_results = await text_search_chunks(
+                    variant, 50, source=True, note=False
                 )
+            except Exception as e:
+                logger.warning(f"Text retrieval failed for chat message: {e}")
+
+        for ranked in (vector_results, text_results):
+            for rank, result in enumerate(ranked or [], start=1):
+                parent = str(result.get("parent_id") or "").split(":")[-1]
+                if parent not in selected_ids:
+                    continue
+                rid = str(result.get("id") or "")
+                if not rid:
+                    continue
+                matches = result.get("matches")
+                content = (
+                    matches
+                    if isinstance(matches, str)
+                    else " ".join(matches or [])
+                )
+                if not content:
+                    continue
+                rrf_score = 1.0 / (rrf_k + rank)
+                if rid in scored:
+                    entry = scored[rid]
+                    entry[0] += rrf_score
+                else:
+                    scored[rid] = [
+                        rrf_score,
+                        {
+                            "id": rid,
+                            "parent_id": result.get("parent_id"),
+                            "title": result.get("title"),
+                            "content": content,
+                        },
+                    ]
 
     # How many relevant passages to hand the model (configurable; more passages
     # = more distinct citable units to spread citations across).
@@ -500,26 +530,44 @@ async def retrieve_relevant_passages(
     return ranked[:max_passages]
 
 
-_HIGH_YIELD_EXPANSION = (
-    " Also cover: contraindications, porphyria, overdose, toxicity, "
-    "respiratory depression, drug interactions, metabolism (CYP enzymes), "
-    "half-lives, active metabolites, withdrawal, dependence."
-)
+def _hybrid_search_enabled() -> bool:
+    """Whether hybrid (vector + full-text) retrieval is enabled."""
+    raw = os.getenv("OPEN_NOTEBOOK_HYBRID_SEARCH")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in ("0", "false", "off", "no")
 
-_MECHANISM_EXPANSION = (
-    " Also cover: receptor subtypes (alpha1, alpha2/3, MT1, MT2, OX1, OX2), "
-    "mechanism of action, GABA-A receptor pharmacology, clinical selection, "
-    "adverse effects."
-)
+
+# Topic-neutral expansion suffixes (configurable). They add breadth that a
+# bare question embedding misses, without assuming a subject — "porphyria" or
+# "CYP enzymes" must never be hardcoded here because the tool is used across
+# subjects. Override via OPEN_NOTEBOOK_RETRIEVAL_EXPANSIONS as a JSON array of
+# strings (e.g. '[" half-lives, drug interactions, contraindications"]' for a
+# pharmacology course); set to [] to disable expansion entirely.
+_DEFAULT_RETRIEVAL_EXPANSIONS = [
+    " Key facts, definitions, mechanisms, examples, and important details.",
+    " Comparisons, differences, advantages, disadvantages, applications, and practical implications.",
+]
+
+
+def _retrieval_expansions() -> List[str]:
+    """Expansion suffixes for retrieval queries (env-configurable, neutral)."""
+    raw = os.getenv("OPEN_NOTEBOOK_RETRIEVAL_EXPANSIONS")
+    if raw is None:
+        return list(_DEFAULT_RETRIEVAL_EXPANSIONS)
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return list(_DEFAULT_RETRIEVAL_EXPANSIONS)
+    if not isinstance(parsed, list):
+        return list(_DEFAULT_RETRIEVAL_EXPANSIONS)
+    return [str(item).strip() for item in parsed if str(item).strip()]
 
 
 def _retrieval_query_variants(query: str) -> List[str]:
     """Deterministic query expansion for passage retrieval."""
-    return [
-        query,
-        f"{query}{_HIGH_YIELD_EXPANSION}",
-        f"{query}{_MECHANISM_EXPANSION}",
-    ]
+    expansions = _retrieval_expansions()
+    return [query] + [f"{query} {suffix}".strip() for suffix in expansions]
 
 
 async def build_source_context(

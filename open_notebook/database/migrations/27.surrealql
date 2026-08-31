@@ -1,0 +1,62 @@
+-- Migration 27: per-passage (chunk-level) full-text search for hybrid retrieval.
+-- Like fn::text_search, but returns each matched source_embedding chunk under
+-- its own `source_embedding:<ulid>` id (insights and notes keep their own ids)
+-- so its rankings can be fused with fn::vector_search_chunks via reciprocal
+-- rank fusion in the chat retrieval pipeline. Mirrors migration 26.
+
+REMOVE FUNCTION IF EXISTS fn::text_search_chunks;
+
+DEFINE FUNCTION IF NOT EXISTS fn::text_search_chunks($query_text: string, $match_count: int, $sources: bool, $show_notes: bool) {
+    LET $source_chunk_search =
+        IF $sources {(
+            SELECT
+                id,
+                source.id AS parent_id,
+                source.title AS title,
+                content,
+                math::max(search::score(1)) AS relevance
+            FROM source_embedding
+            WHERE content @1@ $query_text
+            GROUP BY id
+            ORDER BY relevance DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    LET $source_insight_search =
+        IF $sources {(
+            SELECT
+                id,
+                insight_type + ' - ' + (source.title OR '') AS title,
+                content,
+                source.id AS parent_id,
+                math::max(search::score(1)) AS relevance
+            FROM source_insight
+            WHERE content @1@ $query_text
+            GROUP BY id
+            ORDER BY relevance DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    LET $note_content_search =
+        IF $show_notes {(
+            SELECT
+                id,
+                title,
+                content,
+                id AS parent_id,
+                math::max(search::score(1)) AS relevance
+            FROM note
+            WHERE content @1@ $query_text
+            GROUP BY id
+            ORDER BY relevance DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    RETURN array::union(
+        array::union($source_chunk_search, $source_insight_search),
+        $note_content_search
+    );
+};

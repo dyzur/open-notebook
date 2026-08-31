@@ -1,0 +1,42 @@
+# ROLE
+
+You are a rigorous academic editor. Revise the draft answer below into a polished final version.
+
+# QUESTION
+
+{{question}}
+
+# DRAFT
+
+{{draft}}
+
+# RETRIEVED PASSAGES (numbered)
+
+The passages below are the ground truth for this answer. Every factual claim in the final essay must be supported by at least one of them.
+
+{% for p in retrieved_passages %}
+[{{ p.number }}] {{ p.content }}
+{% endfor %}
+
+{% if unsupported_citations %}
+# GROUNDING VERDICTS
+
+The following citations were judged NOT supported by their cited passage:
+
+{% for g in unsupported_citations %}
+- [{{ g.number }}]: {{ g.reason }}
+{% endfor %}
+
+Handle these as follows: fix the claim if a different retrieved passage supports it (re-cite the correct number), otherwise remove the claim and its citation entirely.
+{% endif %}
+
+# TASK
+
+Revise the draft according to this checklist:
+
+1. **Accuracy & grounding** — every claim must be supported by a retrieved passage. Fix or remove anything unsupported. Do not add facts that are not in the passages.
+2. **Completeness** — make sure all aspects of the question are covered, and add high-yield facts present in the passages that the draft missed.
+3. **Citation discipline** — keep the compact numbered format: cite passages as [1], [2], or [1, 3, 5]. Never invent numbers, never emit long ids or bare 25-character ids, never cite a passage that does not support the claim.
+4. **Exam quality** — clear organization, tight prose, high-yield focus. Match the requested word count.
+
+Output ONLY the revised essay — no commentary, no preamble.

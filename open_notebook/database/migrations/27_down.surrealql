@@ -1,0 +1,3 @@
+-- Migration 27 rollback: drop the per-passage full-text search function.
+
+REMOVE FUNCTION IF EXISTS fn::text_search_chunks;

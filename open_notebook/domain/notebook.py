@@ -910,3 +910,27 @@ async def vector_search_chunks(
         logger.error(f"Error performing chunk-level vector search: {str(e)}")
         logger.exception(e)
         raise DatabaseOperationError(e)
+
+
+async def text_search_chunks(
+    keyword: str, results: int, source: bool = True, note: bool = True
+):
+    """Full-text search that keeps per-passage (chunk-level) ids.
+
+    Complements :func:`vector_search_chunks` for hybrid retrieval: exact term
+    matches (e.g. "porphyria", "aldehyde oxidase") that a semantic embedding
+    can miss. See fn::text_search_chunks in migration 27.
+    """
+    if not keyword:
+        raise InvalidInputError("Search keyword cannot be empty")
+    try:
+        return await repo_query(
+            """
+            SELECT * FROM fn::text_search_chunks($keyword, $results, $source, $note);
+            """,
+            {"keyword": keyword, "results": results, "source": source, "note": note},
+        )
+    except Exception as e:
+        logger.error(f"Error performing chunk-level text search: {str(e)}")
+        logger.exception(e)
+        raise DatabaseOperationError(e)

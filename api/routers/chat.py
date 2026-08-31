@@ -22,6 +22,7 @@ from open_notebook.exceptions import (
 )
 from open_notebook.graphs.chat import graph as chat_graph
 from open_notebook.utils import token_count
+from open_notebook.utils.essay_revision import refine_chat_answer
 from open_notebook.utils.text_utils import normalize_passage_citations
 from open_notebook.utils.context_builder import (
     build_notebook_context,
@@ -395,6 +396,44 @@ async def execute_chat(request: ExecuteChatRequest):
 
         # Convert messages to response format
         messages = extract_chat_messages(result.get("messages", []))
+
+        # Two-pass quality pipeline: grounding-check the draft's citations,
+        # then revise the essay. Best-effort — falls back to the draft on any
+        # failure (see refine_chat_answer).
+        if messages and messages[-1].type == "ai":
+            refined = await refine_chat_answer(
+                question=request.message,
+                draft=messages[-1].content,
+                retrieved_passages=state_values.get("retrieved_passages"),
+                model_id=model_override,
+            )
+            if refined != messages[-1].content:
+                messages[-1].content = refined
+                # Persist the refined answer back into the thread checkpoint so
+                # session reloads (and follow-up turns) show the same text the
+                # user just saw, instead of the pre-revision draft.
+                try:
+                    raw_messages = result.get("messages", [])
+                    if raw_messages:
+                        last_raw = raw_messages[-1]
+                        refined_raw = last_raw.model_copy(
+                            update={"content": refined}
+                        )
+                        await chat_graph.update_state(
+                            RunnableConfig(
+                                configurable={
+                                    "thread_id": full_session_id,
+                                    "model_id": model_override,
+                                }
+                            ),
+                            {"messages": [refined_raw]},
+                            as_node="agent",
+                        )
+                except Exception:
+                    logger.warning(
+                        "Failed to persist refined answer to checkpoint",
+                        exc_info=True,
+                    )
 
         # Attach the number -> passage map so the frontend can turn [1], [2], ...
         # citations in the essay into clickable links.
