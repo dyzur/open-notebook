@@ -470,7 +470,7 @@ async def retrieve_relevant_passages(
         # Semantic candidates (vector).
         try:
             vector_results = await vector_search_chunks(
-                variant, 50, source=True, note=False
+                variant, 80, source=True, note=False
             )
         except Exception as e:
             logger.warning(f"Vector retrieval failed for chat message: {e}")
@@ -482,7 +482,7 @@ async def retrieve_relevant_passages(
         if hybrid:
             try:
                 text_results = await text_search_chunks(
-                    variant, 50, source=True, note=False
+                    variant, 80, source=True, note=False
                 )
             except Exception as e:
                 logger.warning(f"Text retrieval failed for chat message: {e}")
